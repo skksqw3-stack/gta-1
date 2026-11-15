@@ -1,0 +1,142 @@
+name: Build Kotlin APK (Android 4 Legacy Fixed)
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract Zip File
+        run: |
+          set -e
+          #  نام دقیق فایل زیپ جدید شما (به فاصله و پرانتز دقت کنید) 
+          ZIP_FILE="GTA1_Kotlin_Android4.zip"
+
+          
+          if [ ! -f "$ZIP_FILE" ]; then 
+            echo "❌ فایل پیدا نشد: $ZIP_FILE"
+            echo "لیست فایل‌های موجود در پوشه:"
+            ls -la
+            exit 1
+          fi
+          
+          echo "✅ فایل زیپ پیدا شد: $ZIP_FILE"
+          
+          mkdir -p extracted
+          unzip -q -o "$ZIP_FILE" -d extracted
+          
+          PROJECT_DIR=$(find extracted -name "settings.gradle*" | head -n 1 | xargs dirname)
+          if [ -z "$PROJECT_DIR" ]; then 
+            echo "❌ پوشه پروژه (settings.gradle) پیدا نشد"
+            exit 1
+          fi
+          
+          echo "✅ پروژه در مسیر $PROJECT_DIR پیدا شد"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # استفاده از جاوا 17 برای سازگاری با گرِدل 8.7
+          java-version: '17' 
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Setup Gradle Wrapper
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          echo "📦 در حال ساخت gradlew با نسخه 8.7 ..."
+          gradle wrapper --gradle-version 8.7
+          
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            echo "✅ فایل gradlew با موفقیت ساخته و آماده شد."
+          else
+            echo "❌ فایل gradlew ساخته نشد!"
+            ls -la
+            exit 1
+          fi
+
+      - name: Build Unsigned APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          echo "🏗️ شروع بیلد پروژه (نادیده گرفتن Lint)..."
+          # دستور -x lintVitalRelease از خطای targetSdk جلوگیری می‌کند
+          ./gradlew assembleRelease -x lintVitalRelease
+
+      - name: Find apksigner
+        run: |
+          APKSIGNER=$(find $ANDROID_HOME/build-tools -name "apksigner" -type f | head -n 1)
+          if [ -z "$APKSIGNER" ]; then 
+            yes | sdkmanager "build-tools;34.0.0" > /dev/null 2>&1
+            APKSIGNER=$(find $ANDROID_HOME/build-tools -name "apksigner" -type f | head -n 1)
+          fi
+          echo "APKSIGNER_PATH=$APKSIGNER" >> "$GITHUB_ENV"
+
+      - name: Sign APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" -type f | head -n 1)
+          
+          if [ -z "$APK_PATH" ]; then 
+            echo "❌ فایل APK برای امضا پیدا نشد"; 
+            exit 1; 
+          fi
+          
+          echo "🔍 فایل APK پیدا شد در: $APK_PATH"
+          
+          keytool -genkeypair -v \
+            -keystore mykey.keystore \
+            -alias myalias \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass mypassword -keypass mypassword \
+            -dname "CN=CoolerApp, OU=Dev, O=Dev, L=Tehran, S=Tehran, C=IR"
+          
+          ${{ env.APKSIGNER_PATH }} sign \
+            --ks mykey.keystore \
+            --ks-pass pass:mypassword \
+            --key-pass pass:mypassword \
+            --ks-key-alias myalias \
+            "$APK_PATH"
+          
+          NEW_APK_PATH=$(dirname "$APK_PATH")/app-release-signed.apk
+          mv "$APK_PATH" "$NEW_APK_PATH"
+          
+          echo "SIGNED_APK_PATH=$(pwd)/$NEW_APK_PATH" >> "$GITHUB_ENV"
+          echo "✅ فایل APK با موفقیت امضا شد: $NEW_APK_PATH"
+
+      - name: Verify Signed APK Exists
+        run: |
+          if [ -f "${{ env.SIGNED_APK_PATH }}" ]; then
+            echo "✅ فایل APK امضا شده پیدا شد: ${{ env.SIGNED_APK_PATH }}"
+            ls -lh "${{ env.SIGNED_APK_PATH }}"
+          else
+            echo "❌ فایل APK امضا شده پیدا نشد!"
+            exit 1
+          fi
+
+      - name: Upload Signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoolerController-API19-Fixed-APK
+          path: ${{ env.SIGNED_APK_PATH }}
+ 
